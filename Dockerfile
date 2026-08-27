@@ -25,14 +25,14 @@ ENV \
   SEEKERR_CONFIG_PATH=/config/ \
   SEEKERR_LOGGER_FILE="/config/log/seekerr.%Y%m%d.log"
 
-COPY --from=build /go/src/github.com/behold81/seekerr/seekerr /usr/bin/seekerr
+COPY --from=build /go/src/github.com/lightglitch/seekerr/seekerr /usr/bin/seekerr
 
 # ca-certificates are required to fetch outside resources
 RUN apk update && \
     apk add --no-cache ca-certificates
 
 RUN mkdir /config
-COPY --from=build /go/src/github.com/behold81/seekerr/config/seekerr.sample.yaml /config/seekerr.sample.yaml
+COPY --from=build /go/src/github.com/lightglitch/seekerr/config/seekerr.sample.yaml /config/seekerr.sample.yaml
 
 # Config volume
 VOLUME /config
