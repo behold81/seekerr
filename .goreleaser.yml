@@ -3,7 +3,7 @@ builds:
   -
     binary: seekerr
     id: seekerr
-    ldflags: -s -w -X github.com/behold81/seekerr/common/seekerr.buildDate={{.Date}} -X github.com/behold81/seekerr/common/seekerr.commitHash={{ .ShortCommit }}
+    ldflags: -s -w -X github.com/lightglitch/seekerr/common/seekerr.buildDate={{.Date}} -X github.com/behold81/seekerr/common/seekerr.commitHash={{ .ShortCommit }}
     env:
       - CGO_ENABLED=0
     goos:
