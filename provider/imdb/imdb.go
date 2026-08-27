@@ -23,12 +23,12 @@
 package imdb
 
 import (
+	"encoding/csv"
 	"errors"
-	"regexp"
+	"io"
 	"strconv"
 	"strings"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/go-resty/resty/v2"
 	"github.com/lightglitch/seekerr/provider"
 	"github.com/rs/zerolog"
@@ -55,15 +55,24 @@ func (p *Provider) GetItems(config provider.ListConfig) ([]provider.ListItem, er
 
 	result := []provider.ListItem{}
 
+	// IMDb's HTML list pages are now client-rendered. The /export
+	// endpoint provides the same list as CSV and is considerably more
+	// stable for programmatic access.
+	exportURL := strings.TrimRight(config.Url, "/") + "/export"
+
+	p.logger.Debug().
+		Str("URL", exportURL).
+		Msg("Fetching IMDb list export")
+
 	resp, err := p.restyClient.R().
 		SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36").
-		SetHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8").
+		SetHeader("Accept", "text/csv,text/plain,*/*").
 		SetHeader("Accept-Language", "en-GB,en;q=0.9").
 		SetDoNotParseResponse(true).
-		Get(config.Url)
+		Get(exportURL)
 
 	if err != nil {
-		p.logger.Error().Err(err).Msg("Fetching IMDb HTML")
+		p.logger.Error().Err(err).Msg("Fetching IMDb list export")
 		return result, err
 	}
 
@@ -73,137 +82,77 @@ func (p *Provider) GetItems(config provider.ListConfig) ([]provider.ListItem, er
 
 	defer resp.RawBody().Close()
 
-	doc, err := goquery.NewDocumentFromReader(resp.RawBody())
+	reader := csv.NewReader(resp.RawBody())
+	reader.FieldsPerRecord = -1
+
+	// Read CSV header.
+	header, err := reader.Read()
 	if err != nil {
-		p.logger.Error().Err(err).Msg("Parsing IMDb HTML")
+		p.logger.Error().Err(err).Msg("Reading IMDb CSV header")
 		return result, err
 	}
 
-	// IMDb's current list pages use:
-	//
-	//   li.ipc-metadata-list-summary-item
-	//
-	// rather than the old:
-	//
-	//   div.lister-list .lister-item
-	//
-	// Keep the old selector as a fallback in case IMDb serves the legacy
-	// layout to some clients.
+	columns := make(map[string]int)
 
-	items := doc.Find("li.ipc-metadata-list-summary-item")
-
-	if items.Length() == 0 {
-		p.logger.Debug().Msg("Current IMDb selectors found no items; trying legacy selectors")
-		items = doc.Find("div.lister-list .lister-item")
+	for i, column := range header {
+		columns[strings.ToLower(strings.TrimSpace(column))] = i
 	}
 
-	if items.Length() == 0 {
-		p.logger.Warn().Msg("No IMDb list items found")
-		return result, nil
+	// IMDb's export uses "Const" for the IMDb title ID.
+	constIndex, ok := columns["const"]
+	if !ok {
+		return result, errors.New("IMDb CSV does not contain a Const column")
 	}
 
-	p.logger.Debug().Int("Items", items.Length()).Msg("IMDb list items found")
+	titleIndex, titleOK := columns["title"]
+	yearIndex, yearOK := columns["year"]
 
-	idRegex := regexp.MustCompile(`tt\d+`)
-	yearRegex := regexp.MustCompile(`(?:19|20)\d{2}`)
+	if !titleOK {
+		return result, errors.New("IMDb CSV does not contain a Title column")
+	}
 
-	items.EachWithBreak(func(index int, s *goquery.Selection) bool {
-		if index >= limit {
-			return false
+	p.logger.Debug().
+		Int("Columns", len(header)).
+		Msg("IMDb CSV header loaded")
+
+	for index := 0; index < limit; index++ {
+		record, err := reader.Read()
+
+		if err == io.EOF {
+			break
 		}
 
-		var title string
-		var imdbID string
-		var year int
-
-		// ------------------------------------------------------------
-		// Current IMDb layout
-		// ------------------------------------------------------------
-
-		titleLink := s.Find("a.ipc-title-link-wrapper").First()
-
-		if titleLink.Length() == 0 {
-			titleLink = s.Find(`a[href*="/title/tt"]`).First()
-		}
-
-		if titleLink.Length() > 0 {
-			href := titleLink.AttrOr("href", "")
-
-			if href != "" {
-				imdbID = idRegex.FindString(href)
-			}
-		}
-
-		titleElement := s.Find("h3.ipc-title__text").First()
-
-		if titleElement.Length() > 0 {
-			title = strings.TrimSpace(titleElement.Text())
-
-			// IMDb often prefixes titles with the list rank:
-			//
-			// 1. The Shawshank Redemption
-			//
-			// Remove that prefix because Seekerr only wants the title.
-			title = regexp.MustCompile(`^\d+\.\s*`).ReplaceAllString(title, "")
-		}
-
-		// Current IMDb list pages expose metadata as:
-		//
-		// <span class="cli-title-metadata-item">1994</span>
-		//
-		// Use the first four-digit year we can find.
-		metadata := s.Find("span.cli-title-metadata-item")
-
-		metadata.EachWithBreak(func(_ int, m *goquery.Selection) bool {
-			text := strings.TrimSpace(m.Text())
-
-			match := yearRegex.FindString(text)
-
-			if match != "" {
-				year, _ = strconv.Atoi(match)
-				return false
-			}
-
-			return true
-		})
-
-		// ------------------------------------------------------------
-		// Legacy IMDb layout fallback
-		// ------------------------------------------------------------
-
-		if title == "" {
-			titleElement = s.Find(".lister-item-header a").First()
-
-			if titleElement.Length() > 0 {
-				title = strings.TrimSpace(titleElement.Text())
-			}
-		}
-
-		if year == 0 {
-			yearText := s.Find(".lister-item-header .lister-item-year").First().Text()
-
-			if match := yearRegex.FindString(yearText); match != "" {
-				year, _ = strconv.Atoi(match)
-			}
-		}
-
-		if imdbID == "" {
-			href := s.Find(".lister-item-header a").First().AttrOr("href", "")
-
-			if href != "" {
-				imdbID = idRegex.FindString(href)
-			}
-		}
-
-		// Don't add malformed entries. An IMDb ID is particularly
-		// important because Seekerr uses it when resolving the movie.
-		if imdbID == "" {
+		if err != nil {
 			p.logger.Warn().
-				Str("Title", title).
-				Int("Year", year).
-				Msg("Skipping IMDb list item because no IMDb ID was found")
+				Err(err).
+				Msg("Skipping malformed IMDb CSV record")
+			continue
+		}
 
-			return true
+		if constIndex >= len(record) {
+			continue
+		}
+
+		imdbID := strings.TrimSpace(record[constIndex])
+
+		if !strings.HasPrefix(imdbID, "tt") {
+			continue
+		}
+
+		title := ""
+
+		if titleIndex < len(record) {
+			title = strings.TrimSpace(record[titleIndex])
+		}
+
+		year := 0
+
+		if yearOK && yearIndex < len(record) {
+			yearText := strings.TrimSpace(record[yearIndex])
+
+			if yearText != "" && yearText != "\\N" {
+				year, _ = strconv.Atoi(yearText)
+			}
 		}
 
 		p.logger.Debug().
@@ -217,9 +166,7 @@ func (p *Provider) GetItems(config provider.ListConfig) ([]provider.ListItem, er
 			Year:  year,
 			Imdb:  imdbID,
 		})
-
-		return true
-	})
+	}
 
 	p.logger.Info().
 		Int("Items", len(result)).
