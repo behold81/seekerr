@@ -1,0 +1,11 @@
+services:
+  seekerr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: Seekerr
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+    volumes:
+      - /volume1/docker/seekerr/config:/config
